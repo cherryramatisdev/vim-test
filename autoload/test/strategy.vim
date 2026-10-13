@@ -199,6 +199,30 @@ function! s:neovim_poll_sticky_diagnostics(context, output_file, done_file, time
   return 1
 endfunction
 
+function! s:neovim_sticky_wrap_command(cmd, output_file, done_file) abort
+  let output_file = shellescape(a:output_file)
+  let done_file = shellescape(a:done_file)
+  let fish_shell = &shell =~# 'fish'
+  let wrapped_cmd = a:cmd
+
+  if fish_shell
+    let wrapped_cmd .= ' 2>&1 | tee ' . output_file
+          \ . '; set vim_test_exit_code $pipestatus[1]'
+  else
+    let wrapped_cmd .= ' > ' . output_file . ' 2>&1'
+          \ . '; vim_test_exit_code=$?'
+          \ . '; cat ' . output_file
+  endif
+
+  let wrapped_cmd .= '; printf done > ' . done_file
+  if fish_shell
+    let wrapped_cmd .= '; test $vim_test_exit_code -eq 0'
+  else
+    let wrapped_cmd .= '; test "$vim_test_exit_code" -eq 0'
+  endif
+  return wrapped_cmd
+endfunction
+
 function! s:neovim_new_term(cmd, capture_output) abort
   if a:capture_output
     let context = s:neovim_diagnostic_context(a:cmd)
@@ -243,8 +267,7 @@ function! test#strategy#neovim_sticky(cmd) abort
   let l:context.capture_file = 1
   let l:output_file = tempname()
   let l:done_file = tempname()
-  let l:wrapped_cmd = a:cmd . ' 2>&1 | tee ' . shellescape(l:output_file)
-        \ . '; printf done > ' . shellescape(l:done_file)
+  let l:wrapped_cmd = s:neovim_sticky_wrap_command(a:cmd, l:output_file, l:done_file)
   let l:cmd = [l:wrapped_cmd, '']
   let l:tag = '_test_vim_neovim_sticky'
   let l:buffers = getbufinfo({ 'bufloaded': 1 })
