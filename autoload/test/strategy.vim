@@ -150,8 +150,8 @@ function! s:neovim_publish_jest_diagnostics(context, job_id, exit_code, event) a
 
   let diagnostics = []
   for line in split(output, "\n")
-    if line =~# '^\s*●\s\+'
-      let test_name = substitute(line, '^\s*●\s\+', '', '')
+    if line =~# '^\s*\%([●✕]\)\s\+'
+      let test_name = substitute(line, '^\s*\%([●✕]\)\s\+', '', '')
       call add(diagnostics, {
             \ 'lnum': a:context.lnum,
             \ 'col': 0,
