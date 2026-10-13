@@ -5,7 +5,13 @@ endfunction
 function! test#strategy#basic(cmd) abort
   if has('nvim')
     -tabnew
-    call termopen(a:cmd)
+    let context = s:neovim_diagnostic_context(a:cmd)
+    call termopen(a:cmd, {
+          \ 'on_stdout': function('s:neovim_collect_output', [context]),
+          \ 'on_stderr': function('s:neovim_collect_output', [context]),
+          \ 'on_exit': function('s:neovim_publish_jest_diagnostics', [context]),
+          \ })
+    let context.term_bufnr = bufnr('%')
     if !get(g:, 'test#basic#start_normal', 0)
       startinsert
     endif
@@ -97,8 +103,17 @@ function! s:neovim_diagnostic_context(cmd) abort
   let position = get(g:, 'test#last_position', {})
   let file = get(position, 'file', '')
   let bufnr = empty(file) ? bufnr('%') : bufnr(file)
+  if bufnr < 0 && !empty(file)
+    let full_path = fnamemodify(file, ':p')
+    for buffer in getbufinfo()
+      if !empty(buffer.name) && fnamemodify(buffer.name, ':p') ==# full_path
+        let bufnr = buffer.bufnr
+        break
+      endif
+    endfor
+  endif
   if bufnr < 0
-    let bufnr = bufadd(file)
+    let bufnr = empty(file) ? bufnr('%') : bufadd(fnamemodify(file, ':p'))
   endif
 
   let context = {
@@ -140,7 +155,8 @@ function! s:neovim_publish_jest_diagnostics(context, job_id, exit_code, event) a
   endif
 
   let lines = copy(a:context.lines)
-  if empty(lines) && has_key(a:context, 'term_bufnr') && bufexists(a:context.term_bufnr)
+  if empty(lines) && !get(a:context, 'capture_file', 0)
+        \ && has_key(a:context, 'term_bufnr') && bufexists(a:context.term_bufnr)
     let lines = getbufline(a:context.term_bufnr, 1, '$')
   endif
   let output = substitute(join(lines, "\n"), '\e\[[0-9;?]*[ -/]*[@-~]', '', 'g')
@@ -169,6 +185,18 @@ function! s:neovim_publish_jest_diagnostics(context, job_id, exit_code, event) a
           \ 'diagnostics': diagnostics,
           \ })
   endif
+endfunction
+
+function! s:neovim_poll_sticky_diagnostics(context, output_file, done_file, timer) abort
+  if !filereadable(a:done_file)
+    return 0
+  endif
+
+  let a:context.lines = filereadable(a:output_file) ? readfile(a:output_file) : []
+  call s:neovim_publish_jest_diagnostics(a:context, 0, 1, 'exit')
+  call delete(a:output_file)
+  call delete(a:done_file)
+  return 1
 endfunction
 
 function! s:neovim_new_term(cmd, capture_output) abort
@@ -211,7 +239,13 @@ function! test#strategy#neovim(cmd) abort
 endfunction
 
 function! test#strategy#neovim_sticky(cmd) abort
-  let l:cmd = [a:cmd, '']
+  let l:context = s:neovim_diagnostic_context(a:cmd)
+  let l:context.capture_file = 1
+  let l:output_file = tempname()
+  let l:done_file = tempname()
+  let l:wrapped_cmd = a:cmd . ' 2>&1 | tee ' . shellescape(l:output_file)
+        \ . '; printf done > ' . shellescape(l:done_file)
+  let l:cmd = [l:wrapped_cmd, '']
   let l:tag = '_test_vim_neovim_sticky'
   let l:buffers = getbufinfo({ 'bufloaded': 1 })
     \ ->filter({i, v -> has_key(v.variables, l:tag)})
@@ -244,6 +278,7 @@ function! test#strategy#neovim_sticky(cmd) abort
   let l:channel = getbufvar(l:buffers[0].bufnr, '&channel')
   " Needs explicit join to work in all shells
   call chansend(l:channel, join(l:cmd, "\r"))
+  call timer_start(100, function('s:neovim_poll_sticky_diagnostics', [l:context, l:output_file, l:done_file]), {'repeat': -1})
   if len(l:win) > 0
     call win_execute(l:win[0], 'normal G', 1)
   endif

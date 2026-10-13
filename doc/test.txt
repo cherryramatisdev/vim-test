@@ -378,6 +378,8 @@ Requires AsyncRun plugin.
 Basic (default) ~
 
 Runs test commands with `:!`, which switches your Vim to the Terminal.
+In Neovim, Nx Jest failures are also published as diagnostics in the source
+buffer.
 >
   let test#strategy = 'basic'
 <
@@ -421,6 +423,8 @@ that buffer are cleared when a new test starts.
 Neovim sticky~
 
 Runs test commands with `:terminal`, but keeps it open for subsequent runs.
+When run with Nx, failed Jest test names are published as Neovim diagnostics in
+the source buffer.
 >
   let test#strategy = 'neovim_sticky'
 <
