@@ -145,6 +145,60 @@ function! s:neovim_collect_output(context, job_id, data, event) abort
   let a:context.pending = chunks[-1]
 endfunction
 
+function! s:neovim_jest_diagnostic(context, test_name, details) abort
+  let message = 'Jest test failed: ' . a:test_name
+  if !empty(a:details)
+    let message .= ' — ' . join(a:details, '; ')
+  endif
+
+  return {
+        \ 'lnum': a:context.lnum,
+        \ 'col': 0,
+        \ 'severity': 1,
+        \ 'source': 'vim-test',
+        \ 'message': message,
+        \ }
+endfunction
+
+function! s:neovim_jest_failure_diagnostics(context, lines) abort
+  let detailed = []
+  let summary = []
+  let index = 0
+
+  while index < len(a:lines)
+    let line = a:lines[index]
+    if line =~# '^\s*●\s\+'
+      let test_name = substitute(line, '^\s*●\s\+', '', '')
+      let details = []
+      let detail_index = index + 1
+
+      while detail_index < len(a:lines)
+            \ && a:lines[detail_index] !~# '^\s*●\s\+'
+        let detail = substitute(a:lines[detail_index], '^\s\+', '', '')
+        let detail = substitute(detail, '\s\+$', '', '')
+        if detail =~# '^at\s\|^>\s*\d\+\s*|'
+          break
+        elseif !empty(detail)
+              \ && (empty(details) || detail =~# '^\%(Expected\|Received\|Error\|TypeError\|ReferenceError\|AssertionError\|Timeout\|Timed out\)\>' )
+          call add(details, detail)
+        endif
+        let detail_index += 1
+      endwhile
+
+      call add(detailed, s:neovim_jest_diagnostic(a:context, test_name, details))
+      let index = detail_index
+    elseif line =~# '^\s*✕\s\+'
+      let test_name = substitute(line, '^\s*✕\s\+', '', '')
+      call add(summary, s:neovim_jest_diagnostic(a:context, test_name, []))
+      let index += 1
+    else
+      let index += 1
+    endif
+  endwhile
+
+  return empty(detailed) ? summary : detailed
+endfunction
+
 function! s:neovim_publish_jest_diagnostics(context, job_id, exit_code, event) abort
   if a:exit_code == 0 || !has_key(a:context, 'namespace')
     return
@@ -164,19 +218,7 @@ function! s:neovim_publish_jest_diagnostics(context, job_id, exit_code, event) a
     return
   endif
 
-  let diagnostics = []
-  for line in split(output, "\n")
-    if line =~# '^\s*\%([●✕]\)\s\+'
-      let test_name = substitute(line, '^\s*\%([●✕]\)\s\+', '', '')
-      call add(diagnostics, {
-            \ 'lnum': a:context.lnum,
-            \ 'col': 0,
-            \ 'severity': 1,
-            \ 'source': 'vim-test',
-            \ 'message': 'Jest test failed: ' . test_name,
-            \ })
-    endif
-  endfor
+  let diagnostics = s:neovim_jest_failure_diagnostics(a:context, split(output, "\n"))
 
   if !empty(diagnostics)
     call luaeval('vim.diagnostic.set(_A.namespace, _A.bufnr, _A.diagnostics)', {
