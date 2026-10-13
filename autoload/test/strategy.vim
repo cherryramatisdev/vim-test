@@ -81,10 +81,112 @@ function! test#strategy#vimproc(cmd) abort
   execute 'VimProcBang '.a:cmd
 endfunction
 
-function! s:neovim_new_term(cmd) abort
+let s:neovim_diagnostic_namespace = -1
+
+function! s:neovim_diagnostic_namespace() abort
+  if s:neovim_diagnostic_namespace < 0
+    if !luaeval('vim.diagnostic ~= nil and vim.diagnostic.set ~= nil')
+      return -1
+    endif
+    let s:neovim_diagnostic_namespace = luaeval('vim.api.nvim_create_namespace("vim-test")')
+  endif
+  return s:neovim_diagnostic_namespace
+endfunction
+
+function! s:neovim_diagnostic_context(cmd) abort
+  let position = get(g:, 'test#last_position', {})
+  let file = get(position, 'file', '')
+  let bufnr = empty(file) ? bufnr('%') : bufnr(file)
+  if bufnr < 0
+    let bufnr = bufadd(file)
+  endif
+
+  let context = {
+        \ 'cmd': a:cmd,
+        \ 'bufnr': bufnr,
+        \ 'lnum': max([get(position, 'line', line('.')) - 1, 0]),
+        \ 'lines': [],
+        \ 'pending': '',
+        \ }
+
+  let namespace = s:neovim_diagnostic_namespace()
+  if namespace >= 0
+    let context.namespace = namespace
+    call luaeval('vim.diagnostic.reset(_A.namespace, _A.bufnr)', context)
+  endif
+  return context
+endfunction
+
+function! s:neovim_collect_output(context, job_id, data, event) abort
+  if empty(a:data)
+    return
+  endif
+
+  let chunks = copy(a:data)
+  let chunks[0] = a:context.pending . chunks[0]
+  if len(chunks) > 1
+    call extend(a:context.lines, chunks[0 : len(chunks) - 2])
+  endif
+  let a:context.pending = chunks[-1]
+endfunction
+
+function! s:neovim_publish_jest_diagnostics(context, job_id, exit_code, event) abort
+  if a:exit_code == 0 || !has_key(a:context, 'namespace')
+    return
+  endif
+
+  if !empty(a:context.pending)
+    call add(a:context.lines, a:context.pending)
+  endif
+
+  let lines = copy(a:context.lines)
+  if empty(lines) && has_key(a:context, 'term_bufnr') && bufexists(a:context.term_bufnr)
+    let lines = getbufline(a:context.term_bufnr, 1, '$')
+  endif
+  let output = substitute(join(lines, "\n"), '\e\[[0-9;?]*[ -/]*[@-~]', '', 'g')
+  if a:context.cmd !~# '\<nx\>' || output !~# 'Test Suites:'
+    return
+  endif
+
+  let diagnostics = []
+  for line in split(output, "\n")
+    if line =~# '^\s*●\s\+'
+      let test_name = substitute(line, '^\s*●\s\+', '', '')
+      call add(diagnostics, {
+            \ 'lnum': a:context.lnum,
+            \ 'col': 0,
+            \ 'severity': 1,
+            \ 'source': 'vim-test',
+            \ 'message': 'Jest test failed: ' . test_name,
+            \ })
+    endif
+  endfor
+
+  if !empty(diagnostics)
+    call luaeval('vim.diagnostic.set(_A.namespace, _A.bufnr, _A.diagnostics)', {
+          \ 'namespace': a:context.namespace,
+          \ 'bufnr': a:context.bufnr,
+          \ 'diagnostics': diagnostics,
+          \ })
+  endif
+endfunction
+
+function! s:neovim_new_term(cmd, capture_output) abort
+  if a:capture_output
+    let context = s:neovim_diagnostic_context(a:cmd)
+  endif
   let term_position = get(g:, 'test#neovim#term_position', 'botright')
   execute term_position . ' new'
-  call termopen(a:cmd)
+  if a:capture_output
+    call termopen(a:cmd, {
+          \ 'on_stdout': function('s:neovim_collect_output', [context]),
+          \ 'on_stderr': function('s:neovim_collect_output', [context]),
+          \ 'on_exit': function('s:neovim_publish_jest_diagnostics', [context]),
+          \ })
+    let context.term_bufnr = bufnr('%')
+  else
+    call termopen(a:cmd)
+  endif
 endfunction
 
 function! s:neovim_reopen_term(bufnr) abort
@@ -101,7 +203,7 @@ function! s:neovim_reopen_term(bufnr) abort
 endfunction
 
 function! test#strategy#neovim(cmd) abort
-  call s:neovim_new_term(a:cmd)
+  call s:neovim_new_term(a:cmd, 1)
   au BufDelete <buffer> ++nested wincmd p " switch back to last window
   if !get(g:, 'test#neovim#start_normal', 0)
     startinsert
@@ -121,7 +223,7 @@ function! test#strategy#neovim_sticky(cmd) abort
 
   if len(l:buffers) == 0
     let l:current_window = win_getid()
-    call s:neovim_new_term(&shell)
+    call s:neovim_new_term(&shell, 0)
     let l:buffers = getbufinfo(bufnr())
     call win_gotoid(l:current_window)
   else

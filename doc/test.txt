@@ -412,6 +412,9 @@ Runs test commands with `:VimProcBang`. Requires the Vimproc.vim plugin.
 Neovim ~
 
 Runs test commands with `:terminal`, which spawns a terminal inside Neovim.
+When run with Nx, failed Jest test names are published as Neovim diagnostics on
+the source line for the test run. Diagnostics from the previous vim-test run in
+that buffer are cleared when a new test starts.
 >
   let test#strategy = 'neovim'
 <
